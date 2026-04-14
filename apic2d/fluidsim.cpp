@@ -949,7 +949,7 @@ void FluidSim::map_g2p_flip_general(float dt, const scalar lagrangian_ratio, con
       if (p.logJ_ < -0.001) {
         pos_adj = 0.0;
       }
-      p.x_ += (next_grid_velocity + (lagrangian_velocity - original_grid_velocity) * lagrangian_ratio * lagrangian_symplecticity) * dt;
+      p.x_ += (next_grid_velocity + (lagrangian_velocity - original_grid_velocity) * lagrangian_ratio * pos_adj) * dt;
     } else {
       p.x_ += next_grid_velocity * dt;
     }
