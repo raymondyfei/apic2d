@@ -59,9 +59,10 @@ else()
   endif()
 
   if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon")
+    # AArch64 always has NEON; -mfpu is AArch32-only and rejected by Apple clang.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native")
   else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")    
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
   endif()  
 endif()
 
