@@ -138,13 +138,11 @@ class FluidSim {
   Vector2s get_velocity_quadratic(const Vector2s& position);
   Matrix2s get_affine_matrix_quadratic(const Vector2s& position);
   Vector2s get_saved_velocity_quadratic(const Vector2s& position);
-  Matrix2s get_saved_affine_matrix_quadratic(const Vector2s& position);
 
   /*! Linear interpolation kernels */
   Vector2s get_velocity(const Vector2s& position);
   Matrix2s get_affine_matrix(const Vector2s& position);
   Vector2s get_saved_velocity(const Vector2s& position);
-  Matrix2s get_saved_affine_matrix(const Vector2s& position);
 
   /*! Add particle to the system */
   void add_particle(const Particle& position);

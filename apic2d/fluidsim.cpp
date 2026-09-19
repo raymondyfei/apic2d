@@ -490,7 +490,7 @@ Matrix2s FluidSim::get_affine_matrix_quadratic_impl(const Vector2s& position, co
       }
       Vector2s pos = Vector2s(i * dx_, (j + 0.5) * dx_) + origin_;
       scalar w = kernel::quadratic_kernel(position - pos, dx_);
-      ret.block<2, 1>(0, 0) += u_(i, j) * w * (position - pos) * invD;
+      ret.block<2, 1>(0, 0) += uu(i, j) * w * (pos - position) * invD;
     }
   }
 
@@ -502,7 +502,7 @@ Matrix2s FluidSim::get_affine_matrix_quadratic_impl(const Vector2s& position, co
       }
       Vector2s pos = Vector2s((i + 0.5) * dx_, j * dx_) + origin_;
       scalar w = kernel::quadratic_kernel(position - pos, dx_);
-      ret.block<2, 1>(0, 1) += v_(i, j) * w * (position - pos) * invD;
+      ret.block<2, 1>(0, 1) += vv(i, j) * w * (pos - position) * invD;
     }
   }
 
@@ -514,8 +514,6 @@ Vector2s FluidSim::get_velocity_quadratic(const Vector2s& position) { return get
 Matrix2s FluidSim::get_affine_matrix_quadratic(const Vector2s& position) { return get_affine_matrix_quadratic_impl(position, u_, v_); }
 
 Vector2s FluidSim::get_saved_velocity_quadratic(const Vector2s& position) { return get_velocity_quadratic_impl(position, saved_u_, saved_v_); }
-
-Matrix2s FluidSim::get_saved_affine_matrix_quadratic(const Vector2s& position) { return get_affine_matrix_quadratic_impl(position, saved_u_, saved_v_); }
 
 Vector2s FluidSim::get_velocity_and_affine_matrix_with_order(const Vector2s& position, scalar dt, FluidSim::VELOCITY_ORDER v_order,
                                                              FluidSim::INTERPOLATION_ORDER i_order, Matrix2s* affine_matrix) {
@@ -591,18 +589,6 @@ Matrix2s FluidSim::get_affine_matrix(const Vector2s& position) {
   Matrix2s c_;
   c_.col(0) = affine_interpolate_value(p0, u_) / dx_;
   c_.col(1) = affine_interpolate_value(p1, v_) / dx_;
-
-  return c_;
-}
-
-Matrix2s FluidSim::get_saved_affine_matrix(const Vector2s& position) {
-  Vector2s p = (position - origin_) / dx_;
-  Vector2s p0 = p - Vector2s(0, 0.5);
-  Vector2s p1 = p - Vector2s(0.5, 0);
-
-  Matrix2s c_;
-  c_.col(0) = affine_interpolate_value(p0, saved_u_);
-  c_.col(1) = affine_interpolate_value(p1, saved_v_);
 
   return c_;
 }
