@@ -284,11 +284,22 @@ void FluidSim::report_timing() {
     double avg = timing_accum_[name] / static_cast<double>(timing_step_count_);
     total += avg;
     std::cout << "  [" << name << "] " << avg << " ms" << std::endl;
+    if (name == "pcg iterate" && timing_pcg_solves_ > 0) {
+      std::cout << "    iterations: " << timing_pcg_iterations_ << " total, " << static_cast<double>(timing_pcg_iterations_) / timing_pcg_solves_ << "/solve, "
+                << static_cast<double>(timing_pcg_iterations_) / timing_step_count_ << "/step" << std::endl;
+      std::cout << "    time/iteration: " << (timing_pcg_iterations_ > 0 ? timing_accum_[name] / timing_pcg_iterations_ : 0.0) << " ms" << std::endl;
+      std::cout << "    [matrix multiply] " << timing_pcg_multiply_ / timing_step_count_ << " ms/step\n"
+                << "    [preconditioner apply] " << timing_pcg_preconditioner_ / timing_step_count_ << " ms/step\n"
+                << "    [vector operations/reductions] " << timing_pcg_vectors_ / timing_step_count_ << " ms/step" << std::endl;
+    }
   }
   std::cout << "  [total] " << total << " ms/step" << std::endl;
   timing_accum_.clear();
   timing_order_.clear();
   timing_step_count_ = 0;
+  timing_pcg_iterations_ = 0;
+  timing_pcg_solves_ = 0;
+  timing_pcg_multiply_ = timing_pcg_preconditioner_ = timing_pcg_vectors_ = 0.0;
 }
 
 void FluidSim::save_velocity() {
@@ -680,11 +691,14 @@ void FluidSim::solve_pressure(scalar dt) {
   matrix_.zero();
 
   // Build the linear system for pressure
-  parallel_for(1, nj_ - 1, [&](int j) {
-    for (int i = 1; i < ni_ - 1; ++i) {
+  parallel_for(0, nj_, [&](int j) {
+    for (int i = 0; i < ni_; ++i) {
       int index = i + ni_ * j;
       rhs_[index] = 0;
-      pressure_[index] = 0;
+      if (i == 0 || i == ni_ - 1 || j == 0 || j == nj_ - 1) {
+        pressure_[index] = 0;
+        continue;
+      }
       float centre_phi = liquid_phi_(i, j);
       if (centre_phi < 0 && (u_weights_(i, j) > 0.0 || u_weights_(i + 1, j) > 0.0 || v_weights_(i, j) > 0.0 || v_weights_(i, j + 1) > 0.0)) {
         // right neighbour
@@ -747,13 +761,21 @@ void FluidSim::solve_pressure(scalar dt) {
   // The solver records its own sub-phase timings, which we fold into the report.
   scalar residual;
   int iterations;
-  bool success = solver_.solve(matrix_, rhs_, pressure_, residual, iterations);
+  bool success = solver_.solve(matrix_, rhs_, pressure_, residual, iterations, print_timing_, pressure_warm_start_);
   if (!success) {
     std::cout << "WARNING: Pressure solve failed! residual = " << residual << ", iters = " << iterations << std::endl;
   }
   accumulate_timing("pcg factorize", solver_.time_form_preconditioner);
   accumulate_timing("pcg csr build", solver_.time_construct_matrix);
+  accumulate_timing("pcg initial residual", solver_.time_initial_residual);
   accumulate_timing("pcg iterate", solver_.time_iterations);
+  if (print_timing_) {
+    timing_pcg_iterations_ += iterations;
+    ++timing_pcg_solves_;
+    timing_pcg_multiply_ += solver_.time_matrix_multiply;
+    timing_pcg_preconditioner_ += solver_.time_apply_preconditioner;
+    timing_pcg_vectors_ += solver_.time_vector_operations;
+  }
 
   // Apply the velocity update
   tick();

@@ -132,6 +132,7 @@ class FluidSim {
   void set_integration_scheme(INTEGRATOR_TYPE scheme) { integration_scheme_ = scheme; }
   void set_velocity_order(VELOCITY_ORDER order) { velocity_order_ = order; }
   void set_interpolation_order(INTERPOLATION_ORDER order) { interpolation_order_ = order; }
+  void set_pressure_warm_start(bool enabled) { pressure_warm_start_ = enabled; }
 
   scalar solid_distance(const Vector2s& pos) const;
   scalar solid_distance(const Vector2s& pos, const Boundary& b) const;
@@ -297,12 +298,18 @@ class FluidSim {
   INTEGRATOR_TYPE integration_scheme_ = IT_APIC;
   VELOCITY_ORDER velocity_order_ = VO_EULER;
   INTERPOLATION_ORDER interpolation_order_ = IO_LINEAR;
+  bool pressure_warm_start_ = true;
 
   /*! Profiling accumulators (only touched when print_timing_ is set) */
   TimePoint last_time_point_;
   std::map<std::string, double> timing_accum_;
   std::vector<std::string> timing_order_;
   int timing_step_count_ = 0;
+  long long timing_pcg_iterations_ = 0;
+  int timing_pcg_solves_ = 0;
+  double timing_pcg_multiply_ = 0.0;
+  double timing_pcg_preconditioner_ = 0.0;
+  double timing_pcg_vectors_ = 0.0;
 
   std::vector<BrushFootprint> velocity_brush_data_;
 };

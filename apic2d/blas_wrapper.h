@@ -19,8 +19,11 @@
 // Simple placeholder code for BLAS calls - replace with calls to a real BLAS
 // library
 
-#include <vector>
 #include <Eigen/Core>
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <vector>
 
 namespace robertbridson {
 
@@ -40,14 +43,28 @@ inline int index_abs_max(const std::vector<float> &x) {
   // return cblas_idamax((int)x.size(), &x[0], 1);
 
   int maxind = 0;
-  Eigen::Map<const Eigen::VectorXf>(x.data(), x.size()).maxCoeff(&maxind);
+  Eigen::Map<const Eigen::VectorXf>(x.data(), x.size()).cwiseAbs().maxCoeff(&maxind);
   return maxind;
 }
 
 // inf-norm (maximum absolute value) =========================================
 // technically not part of BLAS, but useful
 
-inline float abs_max(const std::vector<float> &x) { return std::fabs(x[index_abs_max(x)]); }
+inline float abs_max(const std::vector<float> &x) { return x.empty() ? 0.0f : Eigen::Map<const Eigen::VectorXf>(x.data(), x.size()).cwiseAbs().maxCoeff(); }
+
+inline float update_solution_and_residual(float alpha, const std::vector<float> &direction, const std::vector<float> &product, std::vector<float> &solution,
+                                          std::vector<float> &residual) {
+  assert(direction.size() == solution.size());
+  assert(product.size() == solution.size());
+  assert(residual.size() == solution.size());
+  float residual_norm = 0.0f;
+  for (size_t i = 0; i < solution.size(); ++i) {
+    solution[i] += alpha * direction[i];
+    residual[i] -= alpha * product[i];
+    residual_norm = std::max(residual_norm, std::fabs(residual[i]));
+  }
+  return residual_norm;
+}
 
 // saxpy (y=alpha*x+y) =======================================================
 

@@ -247,6 +247,12 @@ struct PCGSolver {
   double time_form_preconditioner = 0.0;  // incomplete-Cholesky factorization
   double time_construct_matrix = 0.0;     // dynamic -> fixed (CSR) conversion
   double time_iterations = 0.0;           // the CG iteration loop
+  double time_initial_residual = 0.0;
+
+  // Iteration-loop breakdown, populated only when profile_iterations is enabled.
+  double time_matrix_multiply = 0.0;
+  double time_apply_preconditioner = 0.0;
+  double time_vector_operations = 0.0;
 
   void set_solver_parameters(T tolerance_factor_, int max_iterations_, T modified_incomplete_cholesky_parameter_ = 0.97, T min_diagonal_ratio_ = 0.25) {
     tolerance_factor = tolerance_factor_;
@@ -256,12 +262,14 @@ struct PCGSolver {
     min_diagonal_ratio = min_diagonal_ratio_;
   }
 
-  bool solve(const SparseMatrix<T> &matrix, const std::vector<T> &rhs, std::vector<T> &result, T &residual_out, int &iterations_out) {
-    using SolverClock = std::chrono::high_resolution_clock;
+  bool solve(const SparseMatrix<T> &matrix, const std::vector<T> &rhs, std::vector<T> &result, T &residual_out, int &iterations_out,
+             bool profile_iterations = false, bool warm_start = false) {
+    using SolverClock = std::chrono::steady_clock;
     auto ms_since = [](std::chrono::time_point<SolverClock> t) {
       return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(SolverClock::now() - t).count()) * 1e-6;
     };
-    time_form_preconditioner = time_construct_matrix = time_iterations = 0.0;
+    time_form_preconditioner = time_construct_matrix = time_iterations = time_initial_residual = 0.0;
+    time_matrix_multiply = time_apply_preconditioner = time_vector_operations = 0.0;
 
     unsigned int n = matrix.n;
     if (m.size() != n) {
@@ -270,14 +278,45 @@ struct PCGSolver {
       z.resize(n);
       r.resize(n);
     }
-    zero(result);
+    auto t_initial_begin = SolverClock::now();
+    if (!warm_start || result.size() != n) {
+      result.assign(n, T(0));
+    } else {
+      for (unsigned int i = 0; i < n; ++i) {
+        if (matrix.index[i].empty()) result[i] = 0;
+      }
+    }
     r = rhs;
-    residual_out = BLAS::abs_max(r);
-    if (residual_out == 0) {
+    const T rhs_norm = BLAS::abs_max(rhs);
+    residual_out = rhs_norm;
+    if (rhs_norm == 0) {
+      zero(result);
+      iterations_out = 0;
+      time_initial_residual = ms_since(t_initial_begin);
+      return true;
+    }
+    const T tol = tolerance_factor * rhs_norm;
+    time_initial_residual = ms_since(t_initial_begin);
+
+    auto t_construct_begin = SolverClock::now();
+    fixed_matrix.construct_from_matrix(matrix);
+    time_construct_matrix = ms_since(t_construct_begin);
+    if (warm_start) {
+      auto t_residual_begin = SolverClock::now();
+      multiply_and_subtract(fixed_matrix, result, r);
+      residual_out = BLAS::abs_max(r);
+      // Discard an unhelpful guess, for example after a large topology change.
+      if (residual_out > rhs_norm) {
+        zero(result);
+        r = rhs;
+        residual_out = rhs_norm;
+      }
+      time_initial_residual += ms_since(t_residual_begin);
+    }
+    if (residual_out <= tol) {
       iterations_out = 0;
       return true;
     }
-    scalar tol = tolerance_factor * residual_out;
 
     auto t_factor_begin = SolverClock::now();
     form_preconditioner(matrix);
@@ -290,29 +329,34 @@ struct PCGSolver {
     }
 
     s = z;
-    auto t_construct_begin = SolverClock::now();
-    fixed_matrix.construct_from_matrix(matrix);
-    time_construct_matrix = ms_since(t_construct_begin);
-
     auto t_iter_begin = SolverClock::now();
+    auto t_kernel_begin = t_iter_begin;
+    auto record_kernel = [&](double &elapsed_ms) {
+      if (!profile_iterations) return;
+      auto now = SolverClock::now();
+      elapsed_ms += static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - t_kernel_begin).count()) * 1e-6;
+      t_kernel_begin = now;
+    };
     int iteration;
     for (iteration = 0; iteration < max_iterations; ++iteration) {
       multiply(fixed_matrix, s, z);
+      record_kernel(time_matrix_multiply);
       scalar alpha = rho / BLAS::dot(s, z);
-      BLAS::add_scaled(alpha, s, result);
-      BLAS::add_scaled(-alpha, z, r);
-      residual_out = BLAS::abs_max(r);
+      residual_out = BLAS::update_solution_and_residual(alpha, s, z, result, r);
+      record_kernel(time_vector_operations);
       if (residual_out <= tol) {
         iterations_out = iteration + 1;
         time_iterations = ms_since(t_iter_begin);
         return true;
       }
       apply_preconditioner(r, z);
+      record_kernel(time_apply_preconditioner);
       scalar rho_new = BLAS::dot(z, r);
       scalar beta = rho_new / rho;
       BLAS::add_scaled(beta, s, z);
       s.swap(z);  // s=beta*s+z
       rho = rho_new;
+      record_kernel(time_vector_operations);
     }
     iterations_out = iteration;
     time_iterations = ms_since(t_iter_begin);

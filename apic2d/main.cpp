@@ -78,18 +78,20 @@ void DragFunc(int x, int y) {
   old_mouse_time = new_mouse_time;
 }
 
-// Command-line configuration (defaults match the previous hard-coded values)
+// Command-line configuration
 FluidSim::INTEGRATOR_TYPE arg_integration_scheme = FluidSim::IT_APIC;
 FluidSim::VELOCITY_ORDER arg_velocity_order = FluidSim::VO_EULER;
 FluidSim::INTERPOLATION_ORDER arg_interpolation_order = FluidSim::IO_LINEAR;
 bool arg_enable_timing = false;
+bool arg_pressure_warm_start = true;
 
 void print_usage(const char *exe) {
   std::cout << "Usage: " << exe << " [options]\n"
             << "  --integrator=<pic|flip|rpic|apic|aflip|asflip>   (default: apic)\n"
             << "  --velocity-order=<euler|ra2|rk3|rk4>             (default: euler)\n"
             << "  --interpolation=<linear|quadratic>              (default: linear)\n"
-            << "  --timing                                        enable per-phase timing\n"
+            << "  --timing                                        enable phase timing and PCG iteration profiling\n"
+            << "  --cold-start                                    disable pressure warm-starting\n"
             << "  --help                                          show this message\n";
 }
 
@@ -130,6 +132,10 @@ bool parse_argument(const std::string &arg) {
     arg_enable_timing = true;
     return true;
   }
+  if (arg == "--cold-start") {
+    arg_pressure_warm_start = false;
+    return true;
+  }
   return false;
 }
 
@@ -161,6 +167,7 @@ int main(int argc, char **argv) {
   sim.set_integration_scheme(arg_integration_scheme);
   sim.set_velocity_order(arg_velocity_order);
   sim.set_interpolation_order(arg_interpolation_order);
+  sim.set_pressure_warm_start(arg_pressure_warm_start);
   sim.set_root_boundary(std::move(FluidSim::Boundary(c0, Vector2s(rad0, 0.0), FluidSim::BT_CIRCLE, true)));
   sim.update_boundary();
   sim.init_random_particles();

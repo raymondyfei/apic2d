@@ -58,6 +58,33 @@ CMake-GUI:
 
 User Interface
 -----------------
+Run `./build/apic2d/APIC2D --timing` to print average phase timings every 100
+simulation steps. The `[pcg iterate]` entry includes total iterations,
+iterations per solve and per step, average milliseconds per iteration, and a
+breakdown of matrix multiplication, preconditioner application, and vector
+operations/reductions in milliseconds per step. These nested timings describe
+the iteration loop only (not the initial preconditioner application) and are
+not added again to `[total]`. Detailed profiling adds timer overhead and is
+disabled without `--timing`.
+
+Pressure solves warm-start from the previous pressure by default, clearing
+inactive cells and falling back to a zero guess if the initial residual is
+larger than the right-hand-side norm. The convergence tolerance remains
+`1e-4 * max(abs(rhs))`. To compare against zero-initialized solves, run
+`./build/apic2d/APIC2D --timing --cold-start`. Compare iteration counts and
+overall timings, including the new `[pcg initial residual]` phase, which
+accounts for computing and checking the initial guess.
+
+PCG fuses pressure and residual updates with the residual-norm reduction in
+one traversal. Standalone residual norms use Eigen's value-only SIMD reduction.
+The preconditioner and RHS-relative convergence tolerance are unchanged.
+
+The solver regression checks can be run without the visualization dependencies:
+```
+c++ -std=c++14 -O3 -DSINGLE_THREADED -Iinclude/eigen -Iapic2d tests/pcg_solver_test.cpp -o build/pcg_solver_test
+./build/pcg_solver_test
+```
+
 Press `<LMB>` (or finger touch on a mobile device) and drag directly on the simulated region to paint velocities.
 
 Press `<shift>` with mouse buttons to move the camera. 
