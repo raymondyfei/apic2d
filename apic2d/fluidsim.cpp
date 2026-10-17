@@ -32,30 +32,28 @@
 
 #include "openglutils.h"
 
-// Change here to try different integration scheme, options:
-// IT_PIC: original particle-in-cell (PIC)
-// IT_FLIP: original fluid-implicit-particle (FLIP)
-// IT_RPIC: rotational particle-in-cell (RPIC)
-// IT_APIC: affine particle-in-cell (APIC)
-// IT_AFLIP: affine fluid-implicit-particle (AFLIP)
-// IT_ASFLIP: affine separable fluid-implicit-particle (ASFLIP)
-const FluidSim::INTEGRATOR_TYPE integration_scheme = FluidSim::IT_APIC;
-
-// Change here to try different order for velocity evaluation from grid,
-// options:
-// VO_EULER: first order evaluation
-// VO_RA2: Ralston's second order
-//         evaluation
-// VO_RK3: Runge Kutta's 3rd-order method
-// VO_RK4: Runge Kutta's
-//         4rd-order method
-const FluidSim::VELOCITY_ORDER velocity_order = FluidSim::VO_EULER;
-
-// Change here to try different order for interpolation
-// options:
-// IO_LINEAR: linear interpolation
-// IO_QUADRATIC: quadratic interpolation
-const FluidSim::INTERPOLATION_ORDER interpolation_order = FluidSim::IO_LINEAR;
+// The integration scheme, velocity-evaluation order, and interpolation order
+// are now runtime-configurable members of FluidSim (see set_integration_scheme,
+// set_velocity_order, set_interpolation_order), which the executable wires up
+// from its command-line arguments. Available options:
+//
+// Integration scheme (INTEGRATOR_TYPE):
+//   IT_PIC:    original particle-in-cell (PIC)
+//   IT_FLIP:   original fluid-implicit-particle (FLIP)
+//   IT_RPIC:   rotational particle-in-cell (RPIC)
+//   IT_APIC:   affine particle-in-cell (APIC)
+//   IT_AFLIP:  affine fluid-implicit-particle (AFLIP)
+//   IT_ASFLIP: affine separable fluid-implicit-particle (ASFLIP)
+//
+// Velocity-evaluation order (VELOCITY_ORDER):
+//   VO_EULER:  first order evaluation
+//   VO_RA2:    Ralston's second order evaluation
+//   VO_RK3:    Runge Kutta's 3rd-order method
+//   VO_RK4:    Runge Kutta's 4th-order method
+//
+// Interpolation order (INTERPOLATION_ORDER):
+//   IO_LINEAR:    linear interpolation
+//   IO_QUADRATIC: quadratic interpolation
 
 const scalar lagrangian_ratio = 0.97f;
 const int particle_correction_step = 1;
@@ -200,9 +198,8 @@ void FluidSim::advance(scalar dt) {
   tock("compute weights");
 
   // Set up and solve the variational pressure solve.
-  tick();
+  // (solve_pressure records its own finer-grained sub-phase timings.)
   solve_pressure(dt);
-  tock("solve pressure");
 
   // Pressure projection only produces valid velocities in faces with non-zero
   // associated face area. Because the advection step may interpolate from these
@@ -224,7 +221,7 @@ void FluidSim::advance(scalar dt) {
   tock("relaxation");
 
   tick();
-  switch (integration_scheme) {
+  switch (integration_scheme_) {
     case IT_PIC:
       // The original PIC, which is a specific case of a more general (Affine)
       // FLIP scheme
@@ -268,6 +265,30 @@ void FluidSim::advance(scalar dt) {
     particle_boundary_collision(dt);
     tock("particle collision");
   }
+
+  if (print_timing_) {
+    ++timing_step_count_;
+    if (timing_step_count_ >= 100) report_timing();
+  }
+}
+
+/*!
+  \brief  Print the average per-phase timing accumulated by tock() over the last
+          batch of steps, then reset the accumulators.
+*/
+void FluidSim::report_timing() {
+  if (timing_step_count_ == 0) return;
+  std::cout << "==== Average phase timing over " << timing_step_count_ << " steps ====" << std::endl;
+  double total = 0.0;
+  for (const std::string& name : timing_order_) {
+    double avg = timing_accum_[name] / static_cast<double>(timing_step_count_);
+    total += avg;
+    std::cout << "  [" << name << "] " << avg << " ms" << std::endl;
+  }
+  std::cout << "  [total] " << total << " ms/step" << std::endl;
+  timing_accum_.clear();
+  timing_order_.clear();
+  timing_step_count_ = 0;
 }
 
 void FluidSim::save_velocity() {
@@ -649,6 +670,7 @@ void FluidSim::compute_weights() {
 void FluidSim::solve_pressure(scalar dt) {
   // This linear system could be simplified, but I've left it as is for clarity
   // and consistency with the standard naive discretization
+  tick();
   int system_size = ni_ * nj_;
   if (rhs_.size() != system_size) {
     rhs_.resize(system_size);
@@ -719,16 +741,22 @@ void FluidSim::solve_pressure(scalar dt) {
       }
     }
   });
+  tock("pressure assembly");
 
-  // Solve the system using Robert Bridson's incomplete Cholesky PCG solver
+  // Solve the system using Robert Bridson's incomplete Cholesky PCG solver.
+  // The solver records its own sub-phase timings, which we fold into the report.
   scalar residual;
   int iterations;
   bool success = solver_.solve(matrix_, rhs_, pressure_, residual, iterations);
   if (!success) {
     std::cout << "WARNING: Pressure solve failed! residual = " << residual << ", iters = " << iterations << std::endl;
   }
+  accumulate_timing("pcg factorize", solver_.time_form_preconditioner);
+  accumulate_timing("pcg csr build", solver_.time_construct_matrix);
+  accumulate_timing("pcg iterate", solver_.time_iterations);
 
   // Apply the velocity update
+  tick();
   parallel_for(0, std::max(u_.nj, v_.nj - 1), [&](int j) {
     if (j < u_.nj) {
       for (int i = 1; i < u_.ni - 1; ++i) {
@@ -769,6 +797,7 @@ void FluidSim::solve_pressure(scalar dt) {
       }
     }
   });
+  tock("pressure update");
 }
 
 scalar FluidSim::solid_distance(const Vector2s& pos, const Boundary& b) const {
@@ -813,7 +842,7 @@ void FluidSim::init_random_particles() {
 }
 
 void FluidSim::map_p2g() {
-  if (interpolation_order == IO_LINEAR)
+  if (interpolation_order_ == IO_LINEAR)
     map_p2g_linear();
   else
     map_p2g_quadratic();
@@ -904,12 +933,12 @@ void FluidSim::map_g2p_flip_general(float dt, const scalar lagrangian_ratio, con
     auto& p = particles_[i];
 
     Matrix2s C = Matrix2s::Zero();
-    Vector2s next_grid_velocity = get_velocity_and_affine_matrix_with_order(p.x_, dt, velocity_order, interpolation_order, use_affine ? (&C) : nullptr);
+    Vector2s next_grid_velocity = get_velocity_and_affine_matrix_with_order(p.x_, dt, velocity_order_, interpolation_order_, use_affine ? (&C) : nullptr);
     Vector2s lagrangian_velocity = p.v_;
     Vector2s original_grid_velocity;
 
     if (lagrangian_ratio > 0.0) {
-      original_grid_velocity = get_saved_velocity_with_order(p.x_, interpolation_order);
+      original_grid_velocity = get_saved_velocity_with_order(p.x_, interpolation_order_);
       p.v_ = next_grid_velocity + (lagrangian_velocity - original_grid_velocity) * lagrangian_ratio;
     } else {
       p.v_ = next_grid_velocity;

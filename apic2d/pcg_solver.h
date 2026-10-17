@@ -22,6 +22,7 @@
 // with guarantees made only for M-matrices (where off-diagonal entries are all
 // non-positive, and row sums are non-negative).
 
+#include <chrono>
 #include <cmath>
 
 #include "blas_wrapper.h"
@@ -241,6 +242,12 @@ template <class T>
 struct PCGSolver {
   PCGSolver(void) { set_solver_parameters(1e-4, 100, 0.97, 0.25); }
 
+  // Sub-phase timings (milliseconds) of the most recent solve() call. Only
+  // meaningful for profiling; always populated so callers can read them.
+  double time_form_preconditioner = 0.0;  // incomplete-Cholesky factorization
+  double time_construct_matrix = 0.0;     // dynamic -> fixed (CSR) conversion
+  double time_iterations = 0.0;           // the CG iteration loop
+
   void set_solver_parameters(T tolerance_factor_, int max_iterations_, T modified_incomplete_cholesky_parameter_ = 0.97, T min_diagonal_ratio_ = 0.25) {
     tolerance_factor = tolerance_factor_;
     if (tolerance_factor < 1e-30) tolerance_factor = 1e-30;
@@ -250,6 +257,12 @@ struct PCGSolver {
   }
 
   bool solve(const SparseMatrix<T> &matrix, const std::vector<T> &rhs, std::vector<T> &result, T &residual_out, int &iterations_out) {
+    using SolverClock = std::chrono::high_resolution_clock;
+    auto ms_since = [](std::chrono::time_point<SolverClock> t) {
+      return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(SolverClock::now() - t).count()) * 1e-6;
+    };
+    time_form_preconditioner = time_construct_matrix = time_iterations = 0.0;
+
     unsigned int n = matrix.n;
     if (m.size() != n) {
       m.resize(n);
@@ -266,7 +279,9 @@ struct PCGSolver {
     }
     scalar tol = tolerance_factor * residual_out;
 
+    auto t_factor_begin = SolverClock::now();
     form_preconditioner(matrix);
+    time_form_preconditioner = ms_since(t_factor_begin);
     apply_preconditioner(r, z);
     scalar rho = BLAS::dot(z, r);
     if (rho == 0 || rho != rho) {
@@ -275,7 +290,11 @@ struct PCGSolver {
     }
 
     s = z;
+    auto t_construct_begin = SolverClock::now();
     fixed_matrix.construct_from_matrix(matrix);
+    time_construct_matrix = ms_since(t_construct_begin);
+
+    auto t_iter_begin = SolverClock::now();
     int iteration;
     for (iteration = 0; iteration < max_iterations; ++iteration) {
       multiply(fixed_matrix, s, z);
@@ -285,6 +304,7 @@ struct PCGSolver {
       residual_out = BLAS::abs_max(r);
       if (residual_out <= tol) {
         iterations_out = iteration + 1;
+        time_iterations = ms_since(t_iter_begin);
         return true;
       }
       apply_preconditioner(r, z);
@@ -295,6 +315,7 @@ struct PCGSolver {
       rho = rho_new;
     }
     iterations_out = iteration;
+    time_iterations = ms_since(t_iter_begin);
     return false;
   }
 

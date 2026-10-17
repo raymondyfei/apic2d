@@ -17,7 +17,9 @@
 #define APIC2D_FLUIDSIM_H_
 
 #include <chrono>
+#include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "array2.h"
@@ -125,6 +127,12 @@ class FluidSim {
   void render();
   void render_boundaries(const Boundary& b);
   scalar compute_cfl() const;
+
+  /*! Runtime configuration (typically wired up from command-line arguments) */
+  void set_integration_scheme(INTEGRATOR_TYPE scheme) { integration_scheme_ = scheme; }
+  void set_velocity_order(VELOCITY_ORDER order) { velocity_order_ = order; }
+  void set_interpolation_order(INTERPOLATION_ORDER order) { interpolation_order_ = order; }
+
   scalar solid_distance(const Vector2s& pos) const;
   scalar solid_distance(const Vector2s& pos, const Boundary& b) const;
 
@@ -210,11 +218,23 @@ class FluidSim {
   }
 
   inline void tock(const std::string& info) {
-    if (print_timing_)
-      std::cout << "[" << info << "] "
-                << static_cast<scalar>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - last_time_point_).count()) * 1e-6 << " ms"
-                << std::endl;
+    if (!print_timing_) return;
+    accumulate_timing(info, static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - last_time_point_).count()) * 1e-6);
   }
+
+  // Add an externally-measured duration (ms) to the running per-phase totals.
+  inline void accumulate_timing(const std::string& info, double elapsed_ms) {
+    if (!print_timing_) return;
+    auto it = timing_accum_.find(info);
+    if (it == timing_accum_.end()) {
+      timing_order_.push_back(info);
+      timing_accum_[info] = elapsed_ms;
+    } else {
+      it->second += elapsed_ms;
+    }
+  }
+
+  void report_timing();
 
   Vector2s trace_rk2(const Vector2s& position, scalar dt);
 
@@ -273,7 +293,16 @@ class FluidSim {
   bool draw_boundaries_;
   bool print_timing_;
 
+  /*! Runtime-selectable schemes (defaults preserve the previous hard-coded values) */
+  INTEGRATOR_TYPE integration_scheme_ = IT_APIC;
+  VELOCITY_ORDER velocity_order_ = VO_EULER;
+  INTERPOLATION_ORDER interpolation_order_ = IO_LINEAR;
+
+  /*! Profiling accumulators (only touched when print_timing_ is set) */
   TimePoint last_time_point_;
+  std::map<std::string, double> timing_accum_;
+  std::vector<std::string> timing_order_;
+  int timing_step_count_ = 0;
 
   std::vector<BrushFootprint> velocity_brush_data_;
 };
