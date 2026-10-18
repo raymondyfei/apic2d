@@ -80,20 +80,24 @@ The following are approximate local measurements from incremental comparisons,
 not guaranteed speedups. Each percentage describes the stated metric relative
 to that experiment's baseline; the percentages are **not additive**. Results
 depend on fluid occupancy, resolution, thread count, and hardware.
+The list is ordered roughly by practical impact on overall runtime, not by the
+largest percentage reduction in an individual kernel; the different benchmark
+baselines prevent a strict like-for-like ranking.
 
 | Optimization | Measured reduction | Benchmark context |
 |---|---|---|
-| Pressure warm-starting | **~4% fewer PCG iterations** | 100x100 grid, 300 steps: 14.40 to 13.84 iterations/solve. This is not a wall-time reduction; initial-residual computation adds work. |
-| Fused vector updates and SIMD residual norm | **~50% less vector-operation time; ~5% less solver time** | Fixed 100x100 pressure system, 24 iterations: vector work ~0.21 to ~0.10 ms/solve; solver ~1.68 to ~1.59 ms/solve. |
 | Active-fluid-cell compaction | **~40% less pressure-phase time; ~20% less whole-step time** | 100x100 grid, 300 steps, one CPU thread, ~12-14% active cells. Includes mapping and scattering overhead. |
 | Specialized MIC application | **~40% less MIC-application time; ~14-17% less pressure-phase time** | 100x100 grid, 300 steps, one CPU thread. Includes layout conversion; both versions took 4,172 total iterations. |
-| Per-row assembly reuse and direct stencil-slot writes | **~30% less assembly time** | Moving-fluid assembly ~0.054 to ~0.038 ms/step. Whole-step improvement was too small to distinguish confidently from noise. |
-| Unrolled fixed-width matrix multiplication | **~49% less matrix-multiplication time** | Latest combined 100x100, four-thread run: 0.0322 to 0.0163 ms/step. |
-| Serial pressure scattering on small grids | **~69% less pressure-scatter time** | Latest combined 100x100, four-thread run: 0.0124 to 0.0038 ms/step. |
 | Frontier-based velocity extrapolation | **~32% less extrapolation time** | Latest combined 100x100, four-thread run: 0.0830 to 0.0562 ms/step. |
+| Unrolled fixed-width matrix multiplication | **~49% less matrix-multiplication time** | Latest combined 100x100, four-thread run: 0.0322 to 0.0163 ms/step. |
+| Fused vector updates and SIMD residual norm | **~50% less vector-operation time; ~5% less solver time** | Fixed 100x100 pressure system, 24 iterations: vector work ~0.21 to ~0.10 ms/solve; solver ~1.68 to ~1.59 ms/solve. |
+| Serial pressure scattering on small grids | **~69% less pressure-scatter time** | Latest combined 100x100, four-thread run: 0.0124 to 0.0038 ms/step. |
+| Per-row assembly reuse and direct stencil-slot writes | **~30% less assembly time** | Moving-fluid assembly ~0.054 to ~0.038 ms/step. Whole-step improvement was too small to distinguish confidently from noise. |
+| Pressure warm-starting | **~4% fewer PCG iterations** | 100x100 grid, 300 steps: 14.40 to 13.84 iterations/solve. This is not a wall-time reduction; initial-residual computation adds work. |
 
-The last three rows are phase measurements from the same combined comparison,
-not isolated whole-step gains for each feature. Together, these changes reduced
+The fixed-width matrix, serial-scatter, and frontier-extrapolation rows are phase
+measurements from the same combined comparison, not isolated whole-step gains
+for each feature. Together, these changes reduced
 whole-step time by **~11%** on the 100x100, four-thread, 300-step sample
 (0.478 to 0.427 ms/step), and **~8%** on a 256x256, four-thread, 100-step sample
 (8.97 to 8.27 ms/step). The 100x100 single-thread sample improved by **~2%**
