@@ -235,6 +235,71 @@ void solve_lower_transpose_in_place(const SparseColumnLowerFactor<T> &factor, st
 }
 
 //============================================================================
+// Fixed-width triangular rows for row-major five-point grid factors.
+template <class T>
+struct SparseGridLowerFactor {
+  struct Neighbours {
+    unsigned int first, second;
+    T first_value, second_value;
+  };
+  std::vector<Neighbours> lower, upper;
+
+  bool construct_from_factor(const SparseColumnLowerFactor<T> &factor) {
+    for (unsigned int i = 0; i < factor.n; ++i) {
+      if (factor.colstart[i + 1] - factor.colstart[i] > 2) return false;
+    }
+    lower.assign(factor.n, Neighbours{factor.n, factor.n, T(0), T(0)});
+    upper.assign(factor.n, Neighbours{factor.n, factor.n, T(0), T(0)});
+    for (unsigned int i = 0; i < factor.n; ++i) {
+      for (unsigned int p = factor.colstart[i]; p < factor.colstart[i + 1]; ++p) {
+        const unsigned int j = factor.rowindex[p];
+        Neighbours &outgoing = upper[i];
+        if (outgoing.first == factor.n) {
+          outgoing.first = j;
+          outgoing.first_value = factor.value[p];
+        } else {
+          outgoing.second = j;
+          outgoing.second_value = factor.value[p];
+        }
+        // Preserve the source-column order of the generic forward solve.
+        Neighbours &incoming = lower[j];
+        if (incoming.first == factor.n) {
+          incoming.first = i;
+          incoming.first_value = factor.value[p];
+        } else if (incoming.second == factor.n) {
+          incoming.second = i;
+          incoming.second_value = factor.value[p];
+        } else {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  void apply(const std::vector<T> &invdiag, const std::vector<T> &rhs, std::vector<T> &result) const {
+    const unsigned int n = static_cast<unsigned int>(invdiag.size());
+    assert(lower.size() == n && upper.size() == n);
+    assert(rhs.size() == n && result.size() == n);
+    for (unsigned int i = 0; i < n; ++i) {
+      const Neighbours &row = lower[i];
+      T value = rhs[i];
+      if (row.first != n) value -= row.first_value * result[row.first];
+      if (row.second != n) value -= row.second_value * result[row.second];
+      result[i] = value * invdiag[i];
+    }
+    for (unsigned int i = n; i > 0;) {
+      --i;
+      const Neighbours &row = upper[i];
+      T value = result[i];
+      if (row.first != n) value -= row.first_value * result[row.first];
+      if (row.second != n) value -= row.second_value * result[row.second];
+      result[i] = value * invdiag[i];
+    }
+  }
+};
+
+//============================================================================
 // Encapsulates the Conjugate Gradient algorithm with incomplete Cholesky
 // factorization preconditioner.
 
@@ -253,6 +318,8 @@ struct PCGSolver {
   double time_matrix_multiply = 0.0;
   double time_apply_preconditioner = 0.0;
   double time_vector_operations = 0.0;
+
+  void set_use_grid_preconditioner(bool enabled) { use_grid_preconditioner = enabled; }
 
   void set_solver_parameters(T tolerance_factor_, int max_iterations_, T modified_incomplete_cholesky_parameter_ = 0.97, T min_diagonal_ratio_ = 0.25) {
     tolerance_factor = tolerance_factor_;
@@ -366,8 +433,11 @@ struct PCGSolver {
  protected:
   // internal structures
   SparseColumnLowerFactor<T> ic_factor;  // modified incomplete cholesky factor
-  std::vector<T> m, z, s, r;             // temporary vectors for PCG
-  FixedSparseMatrix<T> fixed_matrix;     // used within loop
+  SparseGridLowerFactor<T> grid_factor;
+  bool use_grid_preconditioner = false;
+  bool grid_preconditioner_ready = false;
+  std::vector<T> m, z, s, r;          // temporary vectors for PCG
+  FixedSparseMatrix<T> fixed_matrix;  // used within loop
 
   // parameters
   T tolerance_factor;
@@ -375,9 +445,16 @@ struct PCGSolver {
   T modified_incomplete_cholesky_parameter;
   T min_diagonal_ratio;
 
-  void form_preconditioner(const SparseMatrix<T> &matrix) { factor_modified_incomplete_cholesky0(matrix, ic_factor); }
+  void form_preconditioner(const SparseMatrix<T> &matrix) {
+    factor_modified_incomplete_cholesky0(matrix, ic_factor);
+    grid_preconditioner_ready = use_grid_preconditioner && grid_factor.construct_from_factor(ic_factor);
+  }
 
   void apply_preconditioner(const std::vector<T> &x, std::vector<T> &result) {
+    if (grid_preconditioner_ready) {
+      grid_factor.apply(ic_factor.invdiag, x, result);
+      return;
+    }
     solve_lower(ic_factor, x, result);
     solve_lower_transpose_in_place(ic_factor, result);
   }

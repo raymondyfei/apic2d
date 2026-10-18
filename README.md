@@ -88,6 +88,21 @@ and `[pressure scatter]` timings, and an inclusive `[pressure solve total]`
 covering mapping, assembly, the solver, scattering, and velocity updates. The
 inclusive total is a separate summary and is not added again to `[total]`.
 
+Pressure solves apply MIC using fixed-width triangular rows for the compact
+five-point stencil, avoiding generic sparse traversal and the forward solve's
+RHS copy. The original MIC factorization is retained. Conversion to the
+fixed-width layout is included in `[pcg factorize]`. The general-purpose
+`PCGSolver` keeps its generic application by default; callers can opt in with
+`set_use_grid_preconditioner(true)`. Factors with more than two entries in any
+triangular row or column use the generic implementation.
+
+Pressure assembly retains matching column-index rows, including when other
+rows change, and writes coefficients directly into their stencil slots.
+Topology changes and fluid-face weights crossing zero rebuild affected rows.
+The timing report's `assembly row reuse` line shows the percentage of rows
+retained. CSR and MIC structures are rebuilt for each solve that needs them;
+whole-matrix structure caching is not used.
+
 The solver regression checks can be run without the visualization dependencies:
 ```
 c++ -std=c++14 -O3 -DSINGLE_THREADED -Iinclude/eigen -Iapic2d tests/pcg_solver_test.cpp -o build/pcg_solver_test

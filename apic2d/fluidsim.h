@@ -292,6 +292,7 @@ class FluidSim {
   std::vector<int> pressure_index_;
   std::vector<int> pressure_cells_;
   std::vector<scalar> active_pressure_;
+  std::vector<unsigned char> pressure_row_structure_reused_;
 
   bool draw_grid_;
   bool draw_particles_;
@@ -318,6 +319,7 @@ class FluidSim {
   long long timing_pressure_active_cells_ = 0;
   long long timing_pressure_grid_cells_ = 0;
   double timing_pressure_solve_ = 0.0;
+  long long timing_pressure_reused_rows_ = 0;
 
   std::vector<BrushFootprint> velocity_brush_data_;
 };

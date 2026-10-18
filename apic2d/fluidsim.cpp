@@ -76,6 +76,7 @@ void FluidSim::initialize(const Vector2s& origin, scalar width, int ni, int nj, 
   draw_velocities_ = draw_velocities;
   draw_boundaries_ = draw_boundaries;
   print_timing_ = print_timing;
+  solver_.set_use_grid_preconditioner(true);
   origin_ = origin;
   ni_ = ni;
   nj_ = nj;
@@ -288,6 +289,8 @@ void FluidSim::report_timing() {
       std::cout << "    active unknowns: " << static_cast<double>(timing_pressure_active_cells_) / timing_pcg_solves_ << " / "
                 << static_cast<double>(timing_pressure_grid_cells_) / timing_pcg_solves_ << " ("
                 << (timing_pressure_grid_cells_ > 0 ? 100.0 * timing_pressure_active_cells_ / timing_pressure_grid_cells_ : 0.0) << "%)" << std::endl;
+      std::cout << "    assembly row reuse: "
+                << (timing_pressure_active_cells_ > 0 ? 100.0 * timing_pressure_reused_rows_ / timing_pressure_active_cells_ : 0.0) << "%" << std::endl;
       std::cout << "    iterations: " << timing_pcg_iterations_ << " total, " << static_cast<double>(timing_pcg_iterations_) / timing_pcg_solves_ << "/solve, "
                 << static_cast<double>(timing_pcg_iterations_) / timing_step_count_ << "/step" << std::endl;
       std::cout << "    time/iteration: " << (timing_pcg_iterations_ > 0 ? timing_accum_[name] / timing_pcg_iterations_ : 0.0) << " ms" << std::endl;
@@ -307,6 +310,7 @@ void FluidSim::report_timing() {
   timing_pcg_multiply_ = timing_pcg_preconditioner_ = timing_pcg_vectors_ = 0.0;
   timing_pressure_active_cells_ = timing_pressure_grid_cells_ = 0;
   timing_pressure_solve_ = 0.0;
+  timing_pressure_reused_rows_ = 0;
 }
 
 void FluidSim::save_velocity() {
@@ -708,7 +712,7 @@ void FluidSim::solve_pressure(scalar dt) {
   rhs_.resize(active_size);
   active_pressure_.resize(active_size);
   matrix_.resize(active_size);
-  matrix_.zero();
+  if (print_timing_) pressure_row_structure_reused_.resize(active_size);
 
   // Build the linear system for pressure
   parallel_for(0, active_size, [&](int index) {
@@ -717,60 +721,84 @@ void FluidSim::solve_pressure(scalar dt) {
     const int j = grid_index / ni_;
     rhs_[index] = 0;
     active_pressure_[index] = pressure_[grid_index];
+    const int right = pressure_index_[grid_index + 1];
+    const int left = pressure_index_[grid_index - 1];
+    const int top = pressure_index_[grid_index + ni_];
+    const int bottom = pressure_index_[grid_index - ni_];
+    const float right_term = u_weights_(i + 1, j) * dt / sqr(dx_);
+    const float left_term = u_weights_(i, j) * dt / sqr(dx_);
+    const float top_term = v_weights_(i, j + 1) * dt / sqr(dx_);
+    const float bottom_term = v_weights_(i, j) * dt / sqr(dx_);
+    unsigned int columns[5];
+    int count = 0;
+    // Compact row-major indices order the stencil bottom, left, center, right, top.
+    const int bottom_slot = count;
+    if (bottom >= 0 && bottom_term != 0) columns[count++] = bottom;
+    const int left_slot = count;
+    if (left >= 0 && left_term != 0) columns[count++] = left;
+    const int diagonal_slot = count;
+    columns[count++] = index;
+    const int right_slot = count;
+    if (right >= 0 && right_term != 0) columns[count++] = right;
+    const int top_slot = count;
+    if (top >= 0 && top_term != 0) columns[count++] = top;
+    auto& row_columns = matrix_.index[index];
+    auto& row_values = matrix_.value[index];
+    const bool reuse = row_columns.size() == count && std::equal(columns, columns + count, row_columns.begin());
+    if (!reuse) row_columns.assign(columns, columns + count);
+    row_values.resize(count);
+    row_values[diagonal_slot] = 0.0f;
+    if (print_timing_) pressure_row_structure_reused_[index] = reuse;
     float centre_phi = liquid_phi_(i, j);
     // right neighbour
-    float term = u_weights_(i + 1, j) * dt / sqr(dx_);
+    float term = right_term;
     float right_phi = liquid_phi_(i + 1, j);
     if (right_phi < 0) {
-      matrix_.add_to_element(index, index, term);
-      const int neighbour = pressure_index_[grid_index + 1];
-      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+      row_values[diagonal_slot] += term;
+      if (right >= 0 && term != 0) row_values[right_slot] = -term;
     } else {
       float theta = fraction_inside(centre_phi, right_phi);
       if (theta < 0.01) theta = 0.01;
-      matrix_.add_to_element(index, index, term / theta);
+      row_values[diagonal_slot] += term / theta;
     }
     rhs_[index] -= u_weights_(i + 1, j) * u_(i + 1, j) / dx_;
 
     // left neighbour
-    term = u_weights_(i, j) * dt / sqr(dx_);
+    term = left_term;
     float left_phi = liquid_phi_(i - 1, j);
     if (left_phi < 0) {
-      matrix_.add_to_element(index, index, term);
-      const int neighbour = pressure_index_[grid_index - 1];
-      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+      row_values[diagonal_slot] += term;
+      if (left >= 0 && term != 0) row_values[left_slot] = -term;
     } else {
       float theta = fraction_inside(centre_phi, left_phi);
       if (theta < 0.01) theta = 0.01;
-      matrix_.add_to_element(index, index, term / theta);
+      row_values[diagonal_slot] += term / theta;
     }
     rhs_[index] += u_weights_(i, j) * u_(i, j) / dx_;
 
     // top neighbour
-    term = v_weights_(i, j + 1) * dt / sqr(dx_);
+    term = top_term;
     float top_phi = liquid_phi_(i, j + 1);
     if (top_phi < 0) {
-      matrix_.add_to_element(index, index, term);
-      const int neighbour = pressure_index_[grid_index + ni_];
-      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+      row_values[diagonal_slot] += term;
+      if (top >= 0 && term != 0) row_values[top_slot] = -term;
     } else {
       float theta = fraction_inside(centre_phi, top_phi);
       if (theta < 0.01) theta = 0.01;
-      matrix_.add_to_element(index, index, term / theta);
+      row_values[diagonal_slot] += term / theta;
     }
     rhs_[index] -= v_weights_(i, j + 1) * v_(i, j + 1) / dx_;
 
     // bottom neighbour
-    term = v_weights_(i, j) * dt / sqr(dx_);
+    term = bottom_term;
     float bot_phi = liquid_phi_(i, j - 1);
     if (bot_phi < 0) {
-      matrix_.add_to_element(index, index, term);
-      const int neighbour = pressure_index_[grid_index - ni_];
-      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+      row_values[diagonal_slot] += term;
+      if (bottom >= 0 && term != 0) row_values[bottom_slot] = -term;
     } else {
       float theta = fraction_inside(centre_phi, bot_phi);
       if (theta < 0.01) theta = 0.01;
-      matrix_.add_to_element(index, index, term / theta);
+      row_values[diagonal_slot] += term / theta;
     }
     rhs_[index] += v_weights_(i, j) * v_(i, j) / dx_;
   });
@@ -796,6 +824,7 @@ void FluidSim::solve_pressure(scalar dt) {
     timing_pcg_vectors_ += solver_.time_vector_operations;
     timing_pressure_active_cells_ += active_size;
     timing_pressure_grid_cells_ += system_size;
+    timing_pressure_reused_rows_ += std::count(pressure_row_structure_reused_.begin(), pressure_row_structure_reused_.end(), 1);
   }
 
   tick();
