@@ -310,7 +310,7 @@ struct PCGSolver {
   // Sub-phase timings (milliseconds) of the most recent solve() call. Only
   // meaningful for profiling; always populated so callers can read them.
   double time_form_preconditioner = 0.0;  // incomplete-Cholesky factorization
-  double time_construct_matrix = 0.0;     // dynamic -> fixed (CSR) conversion
+  double time_construct_matrix = 0.0;     // dynamic -> fixed-width or CSR conversion
   double time_iterations = 0.0;           // the CG iteration loop
   double time_initial_residual = 0.0;
 
@@ -320,6 +320,7 @@ struct PCGSolver {
   double time_vector_operations = 0.0;
 
   void set_use_grid_preconditioner(bool enabled) { use_grid_preconditioner = enabled; }
+  void set_use_grid_matrix(bool enabled) { use_grid_matrix = enabled; }
 
   void set_solver_parameters(T tolerance_factor_, int max_iterations_, T modified_incomplete_cholesky_parameter_ = 0.97, T min_diagonal_ratio_ = 0.25) {
     tolerance_factor = tolerance_factor_;
@@ -366,11 +367,15 @@ struct PCGSolver {
     time_initial_residual = ms_since(t_initial_begin);
 
     auto t_construct_begin = SolverClock::now();
-    fixed_matrix.construct_from_matrix(matrix);
+    grid_matrix_ready = use_grid_matrix && grid_matrix.construct_from_matrix(matrix);
+    if (!grid_matrix_ready) fixed_matrix.construct_from_matrix(matrix);
     time_construct_matrix = ms_since(t_construct_begin);
     if (warm_start) {
       auto t_residual_begin = SolverClock::now();
-      multiply_and_subtract(fixed_matrix, result, r);
+      if (grid_matrix_ready)
+        grid_matrix.multiply_and_subtract(result, r);
+      else
+        multiply_and_subtract(fixed_matrix, result, r);
       residual_out = BLAS::abs_max(r);
       // Discard an unhelpful guess, for example after a large topology change.
       if (residual_out > rhs_norm) {
@@ -406,7 +411,10 @@ struct PCGSolver {
     };
     int iteration;
     for (iteration = 0; iteration < max_iterations; ++iteration) {
-      multiply(fixed_matrix, s, z);
+      if (grid_matrix_ready)
+        grid_matrix.multiply(s, z);
+      else
+        multiply(fixed_matrix, s, z);
       record_kernel(time_matrix_multiply);
       scalar alpha = rho / BLAS::dot(s, z);
       residual_out = BLAS::update_solution_and_residual(alpha, s, z, result, r);
@@ -438,6 +446,9 @@ struct PCGSolver {
   bool grid_preconditioner_ready = false;
   std::vector<T> m, z, s, r;          // temporary vectors for PCG
   FixedSparseMatrix<T> fixed_matrix;  // used within loop
+  SparseGridMatrix<T> grid_matrix;
+  bool use_grid_matrix = false;
+  bool grid_matrix_ready = false;
 
   // parameters
   T tolerance_factor;

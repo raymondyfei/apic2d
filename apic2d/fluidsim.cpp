@@ -63,8 +63,6 @@ const int particle_correction_step = 1;
 const bool use_particle_boundary_collisions = false;
 
 scalar fraction_inside(scalar phi_left, scalar phi_right);
-void extrapolate(Array2s& grid, Array2s& old_grid, const Array2s& grid_weight, const Array2s& grid_liquid_weight, Array2c& valid_, Array2c old_valid_,
-                 const Vector2i& offset, int num_layers);
 
 FluidSim::~FluidSim() { delete m_sorter_; }
 
@@ -77,6 +75,7 @@ void FluidSim::initialize(const Vector2s& origin, scalar width, int ni, int nj, 
   draw_boundaries_ = draw_boundaries;
   print_timing_ = print_timing;
   solver_.set_use_grid_preconditioner(true);
+  solver_.set_use_grid_matrix(true);
   origin_ = origin;
   ni_ = ni;
   nj_ = nj;
@@ -95,7 +94,6 @@ void FluidSim::initialize(const Vector2s& origin, scalar width, int ni, int nj, 
   v_.set_zero();
   nodal_solid_phi_.resize(ni_ + 1, nj_ + 1);
   valid_.resize(ni_ + 1, nj_ + 1);
-  old_valid_.resize(ni_ + 1, nj_ + 1);
   liquid_phi_.resize(ni_, nj_);
   m_sorter_ = new sorter(ni_, nj_);
 }
@@ -207,8 +205,8 @@ void FluidSim::advance(scalar dt) {
   // invalid faces, we must extrapolate velocities from the fluid domain into
   // these zero-area faces.
   tick();
-  extrapolate(u_, temp_u_, u_weights_, liquid_phi_, valid_, old_valid_, Vector2i(-1, 0), 2);
-  extrapolate(v_, temp_v_, v_weights_, liquid_phi_, valid_, old_valid_, Vector2i(0, -1), 2);
+  extrapolate_velocity(u_, u_weights_, Vector2i(-1, 0));
+  extrapolate_velocity(v_, v_weights_, Vector2i(0, -1));
   tock("extrapolate");
 
   // For extrapolated velocities, replace the normal component with
@@ -813,7 +811,7 @@ void FluidSim::solve_pressure(scalar dt) {
     std::cout << "WARNING: Pressure solve failed! residual = " << residual << ", iters = " << iterations << std::endl;
   }
   accumulate_timing("pcg factorize", solver_.time_form_preconditioner);
-  accumulate_timing("pcg csr build", solver_.time_construct_matrix);
+  accumulate_timing("pcg matrix build", solver_.time_construct_matrix);
   accumulate_timing("pcg initial residual", solver_.time_initial_residual);
   accumulate_timing("pcg iterate", solver_.time_iterations);
   if (print_timing_) {
@@ -828,10 +826,13 @@ void FluidSim::solve_pressure(scalar dt) {
   }
 
   tick();
-  parallel_for(0, system_size, [&](int grid_index) {
-    const int index = pressure_index_[grid_index];
-    pressure_[grid_index] = index >= 0 ? active_pressure_[index] : 0.0f;
-  });
+  parallel_for(
+      0, system_size,
+      [&](int grid_index) {
+        const int index = pressure_index_[grid_index];
+        pressure_[grid_index] = index >= 0 ? active_pressure_[index] : 0.0f;
+      },
+      system_size >= 65536);
   tock("pressure scatter");
 
   // Apply the velocity update
@@ -1148,78 +1149,68 @@ Particle::Particle(const Particle& p) : x_(p.x_), v_(p.v_), radii_(p.radii_), ma
 }
 
 /*!
-  \brief Apply several iterations of a very simple "Jacobi"-style propagation of
-         valid velocity data in all directions
+  \brief Extend valid velocities by two Jacobi-style frontier layers.
 */
-void extrapolate(Array2s& grid, Array2s& old_grid, const Array2s& grid_weight, const Array2s& grid_liquid_weight, Array2c& valid, Array2c old_valid_,
-                 const Vector2i& offset, int num_layers) {
-  if (!num_layers) return;
-
-  // Initialize the list of valid_ cells
-  for (int j = 0; j < valid.nj; ++j) valid(0, j) = valid(valid.ni - 1, j) = 0;
-  for (int i = 0; i < valid.ni; ++i) valid(i, 0) = valid(i, valid.nj - 1) = 0;
-
-  Array2s* pgrids[] = {&grid, &old_grid};
-  Array2c* pvalids[] = {&valid, &old_valid_};
-
+void FluidSim::extrapolate_velocity(Array2s& grid, const Array2s& grid_weight, const Vector2i& offset) {
+  valid_.resize(grid.ni, grid.nj);
+  valid_.set_zero();
+  extrapolation_cells_.clear();
+  int valid_count = 0;
   for (int j = 1; j < grid.nj - 1; ++j) {
     for (int i = 1; i < grid.ni - 1; ++i) {
-      valid(i, j) = grid_weight(i, j) > 0 && (grid_liquid_weight(i, j) < 0 || grid_liquid_weight(i + offset(0), j + offset(1)) < 0);
+      valid_(i, j) = grid_weight(i, j) > 0 && (liquid_phi_(i, j) < 0 || liquid_phi_(i + offset(0), j + offset(1)) < 0);
+      valid_count += valid_(i, j);
+    }
+  }
+  if (!valid_count) return;
+  for (int j = 1; j < grid.nj - 1; ++j) {
+    for (int i = 1; i < grid.ni - 1; ++i) {
+      if (valid_(i, j) == 0 && (valid_(i + 1, j) == 1 || valid_(i - 1, j) == 1 || valid_(i, j + 1) == 1 || valid_(i, j - 1) == 1)) {
+        valid_(i, j) = 2;
+        extrapolation_cells_.push_back(i + grid.ni * j);
+      }
     }
   }
 
-  old_valid_ = valid;
-  old_grid = grid;
-
-  for (int layers = 0; layers < num_layers; ++layers) {
-    Array2s* pgrid_source = pgrids[layers & 1];
-    Array2s* pgrid_target = pgrids[!(layers & 1)];
-
-    Array2c* pvalid_source = pvalids[layers & 1];
-    Array2c* pvalid_target = pvalids[!(layers & 1)];
-
-    parallel_for(1, grid.nj - 1, [&](int j) {
-      for (int i = 1; i < grid.ni - 1; ++i) {
-        scalar sum = 0;
-        int count = 0;
-
-        if (!(*pvalid_source)(i, j)) {
-          if ((*pvalid_source)(i + 1, j)) {
-            sum += (*pgrid_source)(i + 1, j);
-            ++count;
-          }
-          if ((*pvalid_source)(i - 1, j)) {
-            sum += (*pgrid_source)(i - 1, j);
-            ++count;
-          }
-          if ((*pvalid_source)(i, j + 1)) {
-            sum += (*pgrid_source)(i, j + 1);
-            ++count;
-          }
-          if ((*pvalid_source)(i, j - 1)) {
-            sum += (*pgrid_source)(i, j - 1);
-            ++count;
-          }
-
-          // If any of neighbour cells were valid_,
-          // assign the cell their average value and tag it as valid_
-          if (count > 0) {
-            (*pgrid_target)(i, j) = sum / static_cast<scalar>(count);
-            (*pvalid_target)(i, j) = 1;
-          }
+  size_t begin = 0, end = extrapolation_cells_.size();
+  for (int layer = 0; layer < 2; ++layer) {
+    if (begin == end) break;
+    extrapolation_values_.resize(end - begin);
+    // Queued cells (2) cannot contribute until the entire layer has been computed.
+    for (size_t k = begin; k < end; ++k) {
+      const int index = extrapolation_cells_[k];
+      scalar sum = 0;
+      int count = 0;
+      for (int neighbour : {index + 1, index - 1, index + grid.ni, index - grid.ni}) {
+        if (valid_.a[neighbour] == 1) {
+          sum += grid.a[neighbour];
+          ++count;
         }
       }
-    });
-
-    if (layers != num_layers - 1) {
-      for (int j = 1; j < grid.nj - 1; ++j) {
-        for (int i = 1; i < grid.ni - 1; ++i) {
-          if (!(*pvalid_source)(i, j)) {
-            (*pgrid_source)(i, j) = (*pgrid_target)(i, j);
-            (*pvalid_source)(i, j) = (*pvalid_target)(i, j);
-          }
-        }
-      }
+      assert(count > 0);
+      extrapolation_values_[k - begin] = sum / static_cast<scalar>(count);
     }
+    for (size_t k = begin; k < end; ++k) {
+      const int index = extrapolation_cells_[k];
+      grid.a[index] = extrapolation_values_[k - begin];
+      valid_.a[index] = 1;
+    }
+    if (layer == 1) break;
+    auto enqueue = [&](int index) {
+      if (valid_.a[index] == 0) {
+        valid_.a[index] = 2;
+        extrapolation_cells_.push_back(index);
+      }
+    };
+    for (size_t k = begin; k < end; ++k) {
+      const int index = extrapolation_cells_[k];
+      const int i = index % grid.ni, j = index / grid.ni;
+      if (i < grid.ni - 2) enqueue(index + 1);
+      if (i > 1) enqueue(index - 1);
+      if (j < grid.nj - 2) enqueue(index + grid.ni);
+      if (j > 1) enqueue(index - grid.ni);
+    }
+    begin = end;
+    end = extrapolation_cells_.size();
   }
 }

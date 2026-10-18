@@ -256,6 +256,50 @@ struct FixedSparseMatrix {
   }
 };
 
+template <class T>
+struct SparseGridMatrix {
+  struct Row {
+    unsigned int column[5];
+    T value[5];
+  };
+  std::vector<Row> rows;
+
+  bool construct_from_matrix(const SparseMatrix<T> &matrix) {
+    for (unsigned int i = 0; i < matrix.n; ++i) {
+      if (matrix.index[i].size() > 5) return false;
+    }
+    rows.resize(matrix.n);
+    for (unsigned int i = 0; i < matrix.n; ++i) {
+      for (unsigned int j = 0; j < 5; ++j) {
+        rows[i].column[j] = j < matrix.index[i].size() ? matrix.index[i][j] : 0;
+        rows[i].value[j] = j < matrix.index[i].size() ? matrix.value[i][j] : T(0);
+      }
+    }
+    return true;
+  }
+
+  void multiply(const std::vector<T> &x, std::vector<T> &result) const {
+    assert(rows.size() == x.size());
+    result.resize(rows.size());
+    for (unsigned int i = 0; i < rows.size(); ++i) result[i] = row_product(rows[i], x);
+  }
+
+  void multiply_and_subtract(const std::vector<T> &x, std::vector<T> &result) const {
+    assert(rows.size() == x.size() && rows.size() == result.size());
+    for (unsigned int i = 0; i < rows.size(); ++i) result[i] -= row_product(rows[i], x);
+  }
+
+ private:
+  static T row_product(const Row &row, const std::vector<T> &x) {
+    T sum = row.value[0] * x[row.column[0]];
+    sum += row.value[1] * x[row.column[1]];
+    sum += row.value[2] * x[row.column[2]];
+    sum += row.value[3] * x[row.column[3]];
+    sum += row.value[4] * x[row.column[4]];
+    return sum;
+  }
+};
+
 typedef FixedSparseMatrix<float> FixedSparseMatrixf;
 typedef FixedSparseMatrix<double> FixedSparseMatrixd;
 

@@ -96,12 +96,25 @@ fixed-width layout is included in `[pcg factorize]`. The general-purpose
 `set_use_grid_preconditioner(true)`. Factors with more than two entries in any
 triangular row or column use the generic implementation.
 
+Pressure matrix multiplication also uses unrolled fixed-width rows with up to
+five entries. Matrix setup is reported as `[pcg matrix build]`; eligible solves
+do not build CSR as well. General-purpose `PCGSolver` callers can opt in with
+`set_use_grid_matrix(true)`; matrices with wider rows fall back to CSR.
+
 Pressure assembly retains matching column-index rows, including when other
 rows change, and writes coefficients directly into their stencil slots.
 Topology changes and fluid-face weights crossing zero rebuild affected rows.
 The timing report's `assembly row reuse` line shows the percentage of rows
-retained. CSR and MIC structures are rebuilt for each solve that needs them;
-whole-matrix structure caching is not used.
+retained. The selected matrix layout and MIC structures are rebuilt for each
+solve that needs them; whole-matrix structure caching is not used.
+
+Pressure scattering runs serially below 65,536 grid cells to avoid scheduling
+overhead, and in parallel for larger grids. Assembly and velocity updates stay
+parallel. Velocity extrapolation keeps the same two layers of neighbor averaging
+but processes a frontier of newly reachable faces instead of repeatedly scanning
+and copying entire grids. Each layer is computed before its values become valid
+for the next layer. Frontier storage is reused between velocity components and
+steps, with the validity mask reset to each component's dimensions.
 
 The solver regression checks can be run without the visualization dependencies:
 ```
@@ -109,7 +122,7 @@ c++ -std=c++14 -O3 -DSINGLE_THREADED -Iinclude/eigen -Iapic2d tests/pcg_solver_t
 ./build/pcg_solver_test
 ```
 
-On macOS, the compact-projection checks can also be built and run with:
+On macOS, the compact-projection and extrapolation checks can also be built and run with:
 ```
 c++ -std=c++14 -O3 -DSINGLE_THREADED -Wno-deprecated-declarations -Iinclude/eigen -Iapic2d \
     tests/pressure_projection_test.cpp apic2d/{fluidsim,kernel,sorter,openglutils,gluvi}.cpp \

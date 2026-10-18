@@ -279,7 +279,10 @@ class FluidSim {
   Array2s u_weights_, v_weights_;
 
   /*! Data arrays for extrapolation */
-  Array2c valid_, old_valid_;
+  Array2c valid_;
+  std::vector<int> extrapolation_cells_;
+  std::vector<scalar> extrapolation_values_;
+  void extrapolate_velocity(Array2s& grid, const Array2s& grid_weight, const Vector2i& offset);
   Array2c u_valid_, v_valid_;
 
   sorter* m_sorter_;

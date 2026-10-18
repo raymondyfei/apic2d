@@ -45,7 +45,11 @@ using std::min;
 using std::swap;
 
 template <typename Index, typename Callable>
-inline void parallel_for(Index start, Index end, Callable c) {
+inline void parallel_for(Index start, Index end, Callable c, bool use_parallel = true) {
+  if (!use_parallel) {
+    for (Index i = start; i < end; ++i) c(i);
+    return;
+  }
 #ifndef SINGLE_THREADED
 #ifdef USE_TBB
   tbb::parallel_for(start, end, [&](Index i) { c(i); });
