@@ -79,10 +79,27 @@ PCG fuses pressure and residual updates with the residual-norm reduction in
 one traversal. Standalone residual norms use Eigen's value-only SIMD reduction.
 The preconditioner and RHS-relative convergence tolerance are unchanged.
 
+The pressure system contains only active interior fluid cells, in row-major
+order. Warm-start values are gathered from the full pressure grid before each
+solve and scattered back afterward, with inactive cells set to zero. This
+preserves the warm start when the active set changes. With `--timing`, the
+report includes average active unknowns versus total grid cells, `[pressure map]`
+and `[pressure scatter]` timings, and an inclusive `[pressure solve total]`
+covering mapping, assembly, the solver, scattering, and velocity updates. The
+inclusive total is a separate summary and is not added again to `[total]`.
+
 The solver regression checks can be run without the visualization dependencies:
 ```
 c++ -std=c++14 -O3 -DSINGLE_THREADED -Iinclude/eigen -Iapic2d tests/pcg_solver_test.cpp -o build/pcg_solver_test
 ./build/pcg_solver_test
+```
+
+On macOS, the compact-projection checks can also be built and run with:
+```
+c++ -std=c++14 -O3 -DSINGLE_THREADED -Wno-deprecated-declarations -Iinclude/eigen -Iapic2d \
+    tests/pressure_projection_test.cpp apic2d/{fluidsim,kernel,sorter,openglutils,gluvi}.cpp \
+    -framework OpenGL -framework GLUT -o build/pressure_projection_test
+./build/pressure_projection_test
 ```
 
 Press `<LMB>` (or finger touch on a mobile device) and drag directly on the simulated region to paint velocities.

@@ -253,6 +253,8 @@ class FluidSim {
   void constrain_velocity();
 
  private:
+  friend struct PressureProjectionTest;
+
   /*! Boundaries */
   std::unique_ptr<Boundary> root_boundary_;
 
@@ -287,6 +289,9 @@ class FluidSim {
   robertbridson::SparseMatrix<scalar> matrix_;
   std::vector<scalar> rhs_;
   std::vector<scalar> pressure_;
+  std::vector<int> pressure_index_;
+  std::vector<int> pressure_cells_;
+  std::vector<scalar> active_pressure_;
 
   bool draw_grid_;
   bool draw_particles_;
@@ -310,6 +315,9 @@ class FluidSim {
   double timing_pcg_multiply_ = 0.0;
   double timing_pcg_preconditioner_ = 0.0;
   double timing_pcg_vectors_ = 0.0;
+  long long timing_pressure_active_cells_ = 0;
+  long long timing_pressure_grid_cells_ = 0;
+  double timing_pressure_solve_ = 0.0;
 
   std::vector<BrushFootprint> velocity_brush_data_;
 };

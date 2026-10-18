@@ -285,6 +285,9 @@ void FluidSim::report_timing() {
     total += avg;
     std::cout << "  [" << name << "] " << avg << " ms" << std::endl;
     if (name == "pcg iterate" && timing_pcg_solves_ > 0) {
+      std::cout << "    active unknowns: " << static_cast<double>(timing_pressure_active_cells_) / timing_pcg_solves_ << " / "
+                << static_cast<double>(timing_pressure_grid_cells_) / timing_pcg_solves_ << " ("
+                << (timing_pressure_grid_cells_ > 0 ? 100.0 * timing_pressure_active_cells_ / timing_pressure_grid_cells_ : 0.0) << "%)" << std::endl;
       std::cout << "    iterations: " << timing_pcg_iterations_ << " total, " << static_cast<double>(timing_pcg_iterations_) / timing_pcg_solves_ << "/solve, "
                 << static_cast<double>(timing_pcg_iterations_) / timing_step_count_ << "/step" << std::endl;
       std::cout << "    time/iteration: " << (timing_pcg_iterations_ > 0 ? timing_accum_[name] / timing_pcg_iterations_ : 0.0) << " ms" << std::endl;
@@ -293,6 +296,8 @@ void FluidSim::report_timing() {
                 << "    [vector operations/reductions] " << timing_pcg_vectors_ / timing_step_count_ << " ms/step" << std::endl;
     }
   }
+  std::cout << "    [pressure solve total] " << timing_pressure_solve_ / timing_step_count_ << " ms/step (including mapping, scattering and velocity update)"
+            << std::endl;
   std::cout << "  [total] " << total << " ms/step" << std::endl;
   timing_accum_.clear();
   timing_order_.clear();
@@ -300,6 +305,8 @@ void FluidSim::report_timing() {
   timing_pcg_iterations_ = 0;
   timing_pcg_solves_ = 0;
   timing_pcg_multiply_ = timing_pcg_preconditioner_ = timing_pcg_vectors_ = 0.0;
+  timing_pressure_active_cells_ = timing_pressure_grid_cells_ = 0;
+  timing_pressure_solve_ = 0.0;
 }
 
 void FluidSim::save_velocity() {
@@ -679,81 +686,93 @@ void FluidSim::compute_weights() {
           geometry
 */
 void FluidSim::solve_pressure(scalar dt) {
-  // This linear system could be simplified, but I've left it as is for clarity
-  // and consistency with the standard naive discretization
+  const auto t_pressure_begin = print_timing_ ? Clock::now() : TimePoint{};
   tick();
-  int system_size = ni_ * nj_;
-  if (rhs_.size() != system_size) {
-    rhs_.resize(system_size);
-    pressure_.resize(system_size);
-    matrix_.resize(system_size);
+  const int system_size = ni_ * nj_;
+  if (pressure_.size() != system_size) pressure_.assign(system_size, 0.0f);
+  pressure_index_.assign(system_size, -1);
+  pressure_cells_.clear();
+  for (int j = 1; j < nj_ - 1; ++j) {
+    for (int i = 1; i < ni_ - 1; ++i) {
+      if (liquid_phi_(i, j) < 0 && (u_weights_(i, j) > 0.0 || u_weights_(i + 1, j) > 0.0 || v_weights_(i, j) > 0.0 || v_weights_(i, j + 1) > 0.0)) {
+        const int grid_index = i + ni_ * j;
+        pressure_index_[grid_index] = static_cast<int>(pressure_cells_.size());
+        pressure_cells_.push_back(grid_index);
+      }
+    }
   }
+  tock("pressure map");
+
+  tick();
+  const int active_size = static_cast<int>(pressure_cells_.size());
+  rhs_.resize(active_size);
+  active_pressure_.resize(active_size);
+  matrix_.resize(active_size);
   matrix_.zero();
 
   // Build the linear system for pressure
-  parallel_for(0, nj_, [&](int j) {
-    for (int i = 0; i < ni_; ++i) {
-      int index = i + ni_ * j;
-      rhs_[index] = 0;
-      if (i == 0 || i == ni_ - 1 || j == 0 || j == nj_ - 1) {
-        pressure_[index] = 0;
-        continue;
-      }
-      float centre_phi = liquid_phi_(i, j);
-      if (centre_phi < 0 && (u_weights_(i, j) > 0.0 || u_weights_(i + 1, j) > 0.0 || v_weights_(i, j) > 0.0 || v_weights_(i, j + 1) > 0.0)) {
-        // right neighbour
-        float term = u_weights_(i + 1, j) * dt / sqr(dx_);
-        float right_phi = liquid_phi_(i + 1, j);
-        if (right_phi < 0) {
-          matrix_.add_to_element(index, index, term);
-          matrix_.add_to_element(index, index + 1, -term);
-        } else {
-          float theta = fraction_inside(centre_phi, right_phi);
-          if (theta < 0.01) theta = 0.01;
-          matrix_.add_to_element(index, index, term / theta);
-        }
-        rhs_[index] -= u_weights_(i + 1, j) * u_(i + 1, j) / dx_;
-
-        // left neighbour
-        term = u_weights_(i, j) * dt / sqr(dx_);
-        float left_phi = liquid_phi_(i - 1, j);
-        if (left_phi < 0) {
-          matrix_.add_to_element(index, index, term);
-          matrix_.add_to_element(index, index - 1, -term);
-        } else {
-          float theta = fraction_inside(centre_phi, left_phi);
-          if (theta < 0.01) theta = 0.01;
-          matrix_.add_to_element(index, index, term / theta);
-        }
-        rhs_[index] += u_weights_(i, j) * u_(i, j) / dx_;
-
-        // top neighbour
-        term = v_weights_(i, j + 1) * dt / sqr(dx_);
-        float top_phi = liquid_phi_(i, j + 1);
-        if (top_phi < 0) {
-          matrix_.add_to_element(index, index, term);
-          matrix_.add_to_element(index, index + ni_, -term);
-        } else {
-          float theta = fraction_inside(centre_phi, top_phi);
-          if (theta < 0.01) theta = 0.01;
-          matrix_.add_to_element(index, index, term / theta);
-        }
-        rhs_[index] -= v_weights_(i, j + 1) * v_(i, j + 1) / dx_;
-
-        // bottom neighbour
-        term = v_weights_(i, j) * dt / sqr(dx_);
-        float bot_phi = liquid_phi_(i, j - 1);
-        if (bot_phi < 0) {
-          matrix_.add_to_element(index, index, term);
-          matrix_.add_to_element(index, index - ni_, -term);
-        } else {
-          float theta = fraction_inside(centre_phi, bot_phi);
-          if (theta < 0.01) theta = 0.01;
-          matrix_.add_to_element(index, index, term / theta);
-        }
-        rhs_[index] += v_weights_(i, j) * v_(i, j) / dx_;
-      }
+  parallel_for(0, active_size, [&](int index) {
+    const int grid_index = pressure_cells_[index];
+    const int i = grid_index % ni_;
+    const int j = grid_index / ni_;
+    rhs_[index] = 0;
+    active_pressure_[index] = pressure_[grid_index];
+    float centre_phi = liquid_phi_(i, j);
+    // right neighbour
+    float term = u_weights_(i + 1, j) * dt / sqr(dx_);
+    float right_phi = liquid_phi_(i + 1, j);
+    if (right_phi < 0) {
+      matrix_.add_to_element(index, index, term);
+      const int neighbour = pressure_index_[grid_index + 1];
+      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+    } else {
+      float theta = fraction_inside(centre_phi, right_phi);
+      if (theta < 0.01) theta = 0.01;
+      matrix_.add_to_element(index, index, term / theta);
     }
+    rhs_[index] -= u_weights_(i + 1, j) * u_(i + 1, j) / dx_;
+
+    // left neighbour
+    term = u_weights_(i, j) * dt / sqr(dx_);
+    float left_phi = liquid_phi_(i - 1, j);
+    if (left_phi < 0) {
+      matrix_.add_to_element(index, index, term);
+      const int neighbour = pressure_index_[grid_index - 1];
+      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+    } else {
+      float theta = fraction_inside(centre_phi, left_phi);
+      if (theta < 0.01) theta = 0.01;
+      matrix_.add_to_element(index, index, term / theta);
+    }
+    rhs_[index] += u_weights_(i, j) * u_(i, j) / dx_;
+
+    // top neighbour
+    term = v_weights_(i, j + 1) * dt / sqr(dx_);
+    float top_phi = liquid_phi_(i, j + 1);
+    if (top_phi < 0) {
+      matrix_.add_to_element(index, index, term);
+      const int neighbour = pressure_index_[grid_index + ni_];
+      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+    } else {
+      float theta = fraction_inside(centre_phi, top_phi);
+      if (theta < 0.01) theta = 0.01;
+      matrix_.add_to_element(index, index, term / theta);
+    }
+    rhs_[index] -= v_weights_(i, j + 1) * v_(i, j + 1) / dx_;
+
+    // bottom neighbour
+    term = v_weights_(i, j) * dt / sqr(dx_);
+    float bot_phi = liquid_phi_(i, j - 1);
+    if (bot_phi < 0) {
+      matrix_.add_to_element(index, index, term);
+      const int neighbour = pressure_index_[grid_index - ni_];
+      if (neighbour >= 0 && term != 0) matrix_.add_to_element(index, neighbour, -term);
+    } else {
+      float theta = fraction_inside(centre_phi, bot_phi);
+      if (theta < 0.01) theta = 0.01;
+      matrix_.add_to_element(index, index, term / theta);
+    }
+    rhs_[index] += v_weights_(i, j) * v_(i, j) / dx_;
   });
   tock("pressure assembly");
 
@@ -761,7 +780,7 @@ void FluidSim::solve_pressure(scalar dt) {
   // The solver records its own sub-phase timings, which we fold into the report.
   scalar residual;
   int iterations;
-  bool success = solver_.solve(matrix_, rhs_, pressure_, residual, iterations, print_timing_, pressure_warm_start_);
+  bool success = solver_.solve(matrix_, rhs_, active_pressure_, residual, iterations, print_timing_, pressure_warm_start_);
   if (!success) {
     std::cout << "WARNING: Pressure solve failed! residual = " << residual << ", iters = " << iterations << std::endl;
   }
@@ -775,7 +794,16 @@ void FluidSim::solve_pressure(scalar dt) {
     timing_pcg_multiply_ += solver_.time_matrix_multiply;
     timing_pcg_preconditioner_ += solver_.time_apply_preconditioner;
     timing_pcg_vectors_ += solver_.time_vector_operations;
+    timing_pressure_active_cells_ += active_size;
+    timing_pressure_grid_cells_ += system_size;
   }
+
+  tick();
+  parallel_for(0, system_size, [&](int grid_index) {
+    const int index = pressure_index_[grid_index];
+    pressure_[grid_index] = index >= 0 ? active_pressure_[index] : 0.0f;
+  });
+  tock("pressure scatter");
 
   // Apply the velocity update
   tick();
@@ -797,7 +825,7 @@ void FluidSim::solve_pressure(scalar dt) {
           u_(i, j) = 0;
           u_valid_(i, j) = 0;
         }
-      }    
+      }
     }
     if (j >= 1 && j < v_.nj - 1) {
       for (int i = 0; i < v_.ni; ++i) {
@@ -820,6 +848,9 @@ void FluidSim::solve_pressure(scalar dt) {
     }
   });
   tock("pressure update");
+  if (print_timing_) {
+    timing_pressure_solve_ += static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t_pressure_begin).count()) * 1e-6;
+  }
 }
 
 scalar FluidSim::solid_distance(const Vector2s& pos, const Boundary& b) const {
