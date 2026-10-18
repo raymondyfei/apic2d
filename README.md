@@ -67,6 +67,47 @@ the iteration loop only (not the initial preconditioner application) and are
 not added again to `[total]`. Detailed profiling adds timer overhead and is
 disabled without `--timing`.
 
+Press `<LMB>` (or finger touch on a mobile device) and drag directly on the simulated region to paint velocities.
+
+Press `<shift>` with mouse buttons to move the camera.
+1. Pan: `<shift>+<LMB>`
+2. Zoom-in (drag to mark the region): `<shift>+<MMB>`
+3. Zoom-out: `<shift>+<RMB>`
+
+Optimizations
+-----------------
+The following are approximate local measurements from incremental comparisons,
+not guaranteed speedups. Each percentage describes the stated metric relative
+to that experiment's baseline; the percentages are **not additive**. Results
+depend on fluid occupancy, resolution, thread count, and hardware.
+
+| Optimization | Measured reduction | Benchmark context |
+|---|---|---|
+| Pressure warm-starting | **~4% fewer PCG iterations** | 100x100 grid, 300 steps: 14.40 to 13.84 iterations/solve. This is not a wall-time reduction; initial-residual computation adds work. |
+| Fused vector updates and SIMD residual norm | **~50% less vector-operation time; ~5% less solver time** | Fixed 100x100 pressure system, 24 iterations: vector work ~0.21 to ~0.10 ms/solve; solver ~1.68 to ~1.59 ms/solve. |
+| Active-fluid-cell compaction | **~40% less pressure-phase time; ~20% less whole-step time** | 100x100 grid, 300 steps, one CPU thread, ~12-14% active cells. Includes mapping and scattering overhead. |
+| Specialized MIC application | **~40% less MIC-application time; ~14-17% less pressure-phase time** | 100x100 grid, 300 steps, one CPU thread. Includes layout conversion; both versions took 4,172 total iterations. |
+| Per-row assembly reuse and direct stencil-slot writes | **~30% less assembly time** | Moving-fluid assembly ~0.054 to ~0.038 ms/step. Whole-step improvement was too small to distinguish confidently from noise. |
+| Unrolled fixed-width matrix multiplication | **~49% less matrix-multiplication time** | Latest combined 100x100, four-thread run: 0.0322 to 0.0163 ms/step. |
+| Serial pressure scattering on small grids | **~69% less pressure-scatter time** | Latest combined 100x100, four-thread run: 0.0124 to 0.0038 ms/step. |
+| Frontier-based velocity extrapolation | **~32% less extrapolation time** | Latest combined 100x100, four-thread run: 0.0830 to 0.0562 ms/step. |
+
+The last three rows are phase measurements from the same combined comparison,
+not isolated whole-step gains for each feature. Together, these changes reduced
+whole-step time by **~11%** on the 100x100, four-thread, 300-step sample
+(0.478 to 0.427 ms/step), and **~8%** on a 256x256, four-thread, 100-step sample
+(8.97 to 8.27 ms/step). The 100x100 single-thread sample improved by **~2%**
+(0.886 to 0.866 ms/step). Floating-point ordering differences can slightly change
+iteration counts and subsequent fluid motion.
+
+Whole-matrix CSR/MIC structure caching was tried and removed: the moving-fluid
+benchmark had **0% whole-matrix reuse hits**. Per-row assembly reuse remains.
+Serial assembly and velocity updates were also tried, but were slower and
+remain parallel. Profiling and residual-norm correctness fixes are not counted
+as speedups.
+
+### Implementation details
+
 Pressure solves warm-start from the previous pressure by default, clearing
 inactive cells and falling back to a zero guess if the initial residual is
 larger than the right-hand-side norm. The convergence tolerance remains
@@ -116,6 +157,8 @@ and copying entire grids. Each layer is computed before its values become valid
 for the next layer. Frontier storage is reused between velocity components and
 steps, with the validity mask reset to each component's dimensions.
 
+### Regression checks
+
 The solver regression checks can be run without the visualization dependencies:
 ```
 c++ -std=c++14 -O3 -DSINGLE_THREADED -Iinclude/eigen -Iapic2d tests/pcg_solver_test.cpp -o build/pcg_solver_test
@@ -129,10 +172,3 @@ c++ -std=c++14 -O3 -DSINGLE_THREADED -Wno-deprecated-declarations -Iinclude/eige
     -framework OpenGL -framework GLUT -o build/pressure_projection_test
 ./build/pressure_projection_test
 ```
-
-Press `<LMB>` (or finger touch on a mobile device) and drag directly on the simulated region to paint velocities.
-
-Press `<shift>` with mouse buttons to move the camera. 
-1. Pan: `<shift>+<LMB>`
-2. Zoom-in (drag to mark the region): `<shift>+<MMB>`
-3. Zoom-out: `<shift>+<RMB>`
